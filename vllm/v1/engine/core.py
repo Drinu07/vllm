@@ -562,6 +562,13 @@ class EngineCore:
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 if decode and not warmup and self.has_work():
+                    # For eBPF instrumentation, start trigger before first decode phase
+                    # if step == 1:
+                    #     try:
+                    #         with open("/tmp/decode_trigger", "a"):
+                    #             pass
+                    #     except Exception as e:
+                    #         print(f"Failed to trigger bpftrace: {e}") 
                     nvtx.range_push(f"Step {step}")
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
