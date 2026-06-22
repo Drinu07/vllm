@@ -86,6 +86,15 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import IterationDetails, compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
+
+import torch.cuda.nvtx as nvtx
+
+global step, decode, warmup
+step = 0
+decode = False
+warmup = True
+
+
 logger = init_logger(__name__)
 
 HANDSHAKE_TIMEOUT_MINS = 5
@@ -533,6 +542,12 @@ class EngineCore:
         3. Update the scheduler from the output.
         """
 
+        global step, decode, warmup
+        
+        if decode and not warmup:
+            step += 1
+
+
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -546,6 +561,8 @@ class EngineCore:
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
+                if decode and not warmup and self.has_work():
+                    nvtx.range_push(f"Step {step}")
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
@@ -576,6 +593,8 @@ class EngineCore:
                 if len(batch_queue) < self.batch_queue_size and (
                     model_executed or self.scheduler.has_requests()
                 ):
+                    if decode and self.has_work():
+                        nvtx.range_pop()
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
                     return None, model_executed
@@ -593,6 +612,8 @@ class EngineCore:
             self.log_iteration_details(scheduler_output),
         ):
             model_output = future.result()
+            if decode and not warmup and self.has_work():
+                nvtx.range_pop()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -605,6 +626,17 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+
+        if scheduler_output.scheduled_new_reqs == []:
+            decode = True
+        
+        if warmup:
+            for req in scheduler_output.scheduled_new_reqs:
+                if "warmup" not in req.req_id:
+                    warmup = False
+                    break
+
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
